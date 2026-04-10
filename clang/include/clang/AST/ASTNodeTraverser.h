@@ -547,9 +547,12 @@ public:
 
   void VisitFunctionDecl(const FunctionDecl *D) {
     if (FunctionTemplateSpecializationInfo *FTSI =
-            D->getTemplateSpecializationInfo())
-      dumpTemplateArgumentList(*FTSI->TemplateArguments);
-    else if (DependentFunctionTemplateSpecializationInfo *DFTSI =
+            D->getTemplateSpecializationInfo()) {
+      if (FTSI->TemplateArgumentsAsWritten)
+        dumpASTTemplateArgumentListInfo(FTSI->TemplateArgumentsAsWritten);
+      else
+        dumpTemplateArgumentList(*FTSI->TemplateArguments);
+    } else if (DependentFunctionTemplateSpecializationInfo *DFTSI =
                  D->getDependentSpecializationInfo())
       dumpASTTemplateArgumentListInfo(DFTSI->TemplateArgumentsAsWritten);
 
@@ -693,7 +696,10 @@ public:
 
   void VisitClassTemplateSpecializationDecl(
       const ClassTemplateSpecializationDecl *D) {
-    dumpTemplateArgumentList(D->getTemplateArgs());
+    if (const auto *ArgsAsWritten = D->getTemplateArgsAsWritten())
+      dumpASTTemplateArgumentListInfo(ArgsAsWritten);
+    else
+      dumpTemplateArgumentList(D->getTemplateArgs());
   }
 
   void VisitClassTemplatePartialSpecializationDecl(
@@ -710,7 +716,10 @@ public:
 
   void
   VisitVarTemplateSpecializationDecl(const VarTemplateSpecializationDecl *D) {
-    dumpTemplateArgumentList(D->getTemplateArgs());
+    if (const auto *ArgsAsWritten = D->getTemplateArgsAsWritten())
+      dumpASTTemplateArgumentListInfo(ArgsAsWritten);
+    else
+      dumpTemplateArgumentList(D->getTemplateArgs());
     VisitVarDecl(D);
   }
 

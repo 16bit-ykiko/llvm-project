@@ -10803,10 +10803,14 @@ DeclResult Sema::ActOnExplicitInstantiation(Scope *S,
     if (!HasNoEffect) {
       // Instantiate static data member or variable template.
       Prev->setTemplateSpecializationKind(TSK, D.getIdentifierLoc());
-      if (auto *VTSD = dyn_cast<VarTemplatePartialSpecializationDecl>(Prev)) {
+      if (auto *VTSD = dyn_cast<VarTemplateSpecializationDecl>(Prev)) {
         VTSD->setExternKeywordLoc(ExternLoc);
         VTSD->setTemplateKeywordLoc(TemplateLoc);
       }
+      if (D.getCXXScopeSpec().isSet())
+        if (auto *VD = dyn_cast<DeclaratorDecl>(Prev))
+          VD->setQualifierInfo(
+              D.getCXXScopeSpec().getWithLocInContext(Context));
 
       // Merge attributes.
       ProcessDeclAttributeList(S, Prev, D.getDeclSpec().getAttributes());
@@ -10827,8 +10831,7 @@ DeclResult Sema::ActOnExplicitInstantiation(Scope *S,
       return true;
     }
 
-    // FIXME: Create an ExplicitInstantiation node?
-    return (Decl*) nullptr;
+    return Prev;
   }
 
   // If the declarator is a template-id, translate the parser's template
@@ -11035,7 +11038,10 @@ DeclResult Sema::ActOnExplicitInstantiation(Scope *S,
       Context.getTargetInfo().getCXXABI().isMicrosoft())
     TSK = TSK_ExplicitInstantiationDeclaration;
 
-  Specialization->setTemplateSpecializationKind(TSK, D.getIdentifierLoc());
+  // Set TSK on the canonical decl, not on a previous InstDecl redeclaration
+  // that overload resolution may have returned.
+  Specialization->getCanonicalDecl()->setTemplateSpecializationKind(
+      TSK, D.getIdentifierLoc());
 
   if (Specialization->isDefined()) {
     // Let the ASTConsumer know that this function has been explicitly
@@ -11065,8 +11071,67 @@ DeclResult Sema::ActOnExplicitInstantiation(Scope *S,
               : Specialization->getInstantiatedFromMemberFunction(),
       D.getIdentifierLoc(), D.getCXXScopeSpec().isSet(), TSK);
 
-  // FIXME: Create some kind of ExplicitInstantiationDecl here.
-  return (Decl*) nullptr;
+  // Create a new FunctionDecl as a redeclaration at the instantiation site,
+  // so that each explicit instantiation statement has its own node with
+  // proper source locations, NNS, and template argument info.
+  if (auto *FTSInfo = Specialization->getTemplateSpecializationInfo()) {
+    SourceLocation StartLoc = ExternLoc.isValid() ? ExternLoc : TemplateLoc;
+    FunctionDecl *InstDecl = FunctionDecl::Create(
+        Context, Specialization->getDeclContext(), StartLoc,
+        D.getIdentifierLoc(), Specialization->getDeclName(),
+        Specialization->getType(), Specialization->getTypeSourceInfo(),
+        Specialization->getStorageClass());
+
+    if (D.getCXXScopeSpec().isSet())
+      InstDecl->setQualifierInfo(
+          D.getCXXScopeSpec().getWithLocInContext(Context));
+
+    // Build parameters from the Declarator (instantiation-site locations).
+    SmallVector<ParmVarDecl *, 4> Params;
+    for (unsigned I = 0, N = D.getNumTypeObjects(); I < N; ++I) {
+      if (D.getTypeObject(I).Kind != DeclaratorChunk::Function)
+        continue;
+      const auto &Fun = D.getTypeObject(I).Fun;
+      for (unsigned J = 0; J < Fun.NumParams; ++J) {
+        if (auto *P = dyn_cast_if_present<ParmVarDecl>(Fun.Params[J].Param)) {
+          P->setDeclContext(InstDecl);
+          Params.push_back(P);
+        }
+      }
+      break;
+    }
+    InstDecl->setParams(Params);
+
+    // Create FTSInfo for InstDecl manually, without registering in the
+    // FoldingSet. The canonical decl (Specialization) is already there.
+    // Using setFunctionTemplateSpecialization would call ReplaceNode,
+    // which corrupts the FoldingSet entry and causes the next explicit
+    // instantiation to find InstDecl instead of Specialization.
+    TemplateArgumentList *TemplArgsCopy = TemplateArgumentList::CreateCopy(
+        Context, FTSInfo->TemplateArguments->asArray());
+    TemplateArgumentListInfo *ArgsAsWrittenPtr =
+        HasExplicitTemplateArgs ? &TemplateArgs : nullptr;
+    auto *NewFTInfo = FunctionTemplateSpecializationInfo::Create(
+        Context, InstDecl, FTSInfo->getTemplate(), TSK, TemplArgsCopy,
+        ArgsAsWrittenPtr, D.getIdentifierLoc(), nullptr);
+    InstDecl->TemplateOrSpecialization = NewFTInfo;
+
+    InstDecl->setPreviousDecl(Specialization->getMostRecentDecl());
+    Specialization->getDeclContext()->addDecl(InstDecl);
+
+    return InstDecl;
+  }
+
+  // For member functions of class template specializations, store the NNS
+  // directly on the specialization (no separate InstDecl, as adding a decl
+  // to the class DeclContext would interfere with member name lookup).
+  if (Specialization->getMemberSpecializationInfo()) {
+    if (D.getCXXScopeSpec().isSet())
+      Specialization->setQualifierInfo(
+          D.getCXXScopeSpec().getWithLocInContext(Context));
+  }
+
+  return Specialization;
 }
 
 TypeResult Sema::ActOnDependentTag(Scope *S, unsigned TagSpec, TagUseKind TUK,

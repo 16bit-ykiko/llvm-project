@@ -2339,6 +2339,7 @@ void TextNodeDumper::VisitIndirectFieldDecl(const IndirectFieldDecl *D) {
 }
 
 void TextNodeDumper::VisitFunctionDecl(const FunctionDecl *D) {
+  dumpNestedNameSpecifier(D->getQualifier());
   dumpName(D);
   dumpType(D->getType());
   dumpTemplateSpecializationKind(D->getTemplateSpecializationKind());
