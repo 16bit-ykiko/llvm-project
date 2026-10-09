@@ -1,0 +1,44 @@
+# CI-only workflow for the libc++ __config_site driver change; not for upstream.
+name: libcxx-config-site-ci
+
+on:
+  push:
+    branches: [libcxx-config-site-ci]
+
+permissions:
+  contents: read
+
+jobs:
+  driver-tests:
+    name: clang/test/Driver (Release, assertions)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            llvm
+            clang
+            cmake
+            third-party
+            libc
+      - name: Tools, and a libc++ of the host's in /usr/include
+        run: |
+          set -ex
+          sudo apt-get update -q
+          sudo apt-get install -yq ninja-build lld libc++-dev
+          ls -d /usr/include/c++/v1 /usr/local/include/c++/v1 /usr/lib/llvm-*/include/c++/v1 || true
+          nproc; free -g; df -h .
+      - name: Configure
+        run: |
+          cmake -G Ninja -S llvm -B build \
+            -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON \
+            -DLLVM_ENABLE_PROJECTS=clang \
+            -DLLVM_TARGETS_TO_BUILD="X86;AArch64;ARM" \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DLLVM_USE_LINKER=lld -DLLVM_PARALLEL_LINK_JOBS=2 \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF
+      - name: Build clang and its test tools
+        run: ninja -C build clang-test-depends
+      - name: clang/test/Driver
+        run: build/bin/llvm-lit -sv clang/test/Driver
