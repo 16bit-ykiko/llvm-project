@@ -1,0 +1,261 @@
+# CI-only workflow for PR 226794 (Setup API lookup on MinGW); not for upstream.
+name: setupapi-mingw-ci
+
+on:
+  push:
+    branches: [setupapi-mingw-ci]
+
+permissions:
+  contents: read
+
+env:
+  LLVM_CMAKE_ARGS: >-
+    -G Ninja -S llvm -B build
+    -DCMAKE_BUILD_TYPE=Release
+    -DLLVM_TARGETS_TO_BUILD=X86
+    -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF
+    -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_DOCS=OFF
+    -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_LIBXML2=OFF
+    -DLLVM_ENABLE_LZMA=OFF
+
+jobs:
+  mingw-headers:
+    name: MSVCPaths.cpp with mingw-w64 ${{ matrix.mingw }} headers, ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        mingw: [v9.0.0, v10.0.0]
+    env:
+      LLVM_MINGW: "20261006"
+      TRIPLE: ${{ matrix.arch }}-w64-mingw32
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          sparse-checkout: |
+            llvm
+            cmake
+            third-party
+            libc
+      - name: llvm-mingw with the mingw-w64 ${{ matrix.mingw }} headers
+        run: |
+          set -ex
+          sudo apt-get update -q && sudo apt-get install -yq ninja-build
+          TC=$RUNNER_TEMP/llvm-mingw
+          mkdir -p $TC
+          curl -fsSL https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW/llvm-mingw-$LLVM_MINGW-ucrt-ubuntu-22.04-x86_64.tar.xz \
+            | tar -xJ -C $TC --strip-components=1
+          # Keep libc++'s headers, replace all of mingw-w64's.
+          inc=$TC/generic-w64-mingw32/include
+          mv $inc $RUNNER_TEMP/include.orig
+          mkdir -p $inc
+          mv $RUNNER_TEMP/include.orig/c++ $inc/
+          cd $RUNNER_TEMP
+          git clone -q --depth 1 --branch ${{ matrix.mingw }} https://github.com/mingw-w64/mingw-w64
+          mkdir mingw-w64/mingw-w64-headers/build && cd mingw-w64/mingw-w64-headers/build
+          ../configure --prefix=$TC/generic-w64-mingw32 --with-default-win32-winnt=0x601 --with-default-msvcrt=ucrt > /dev/null
+          make install > /dev/null
+          grep -E "define __MINGW64_VERSION_(MAJOR|MINOR|BUGFIX)" $inc/_mingw_mac.h
+          echo "$TC/bin" >> $GITHUB_PATH
+          echo "TC=$TC" >> $GITHUB_ENV
+      - name: Compile MSVCPaths.cpp (expected to fail with v9.0.0)
+        run: |
+          cmake $LLVM_CMAKE_ARGS -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
+            -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.arch }} \
+            -DCMAKE_C_COMPILER=$TRIPLE-clang -DCMAKE_CXX_COMPILER=$TRIPLE-clang++ \
+            -DCMAKE_RC_COMPILER=$TRIPLE-windres \
+            -DCMAKE_FIND_ROOT_PATH=$TC/$TRIPLE \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+            -DLLVM_HOST_TRIPLE=$TRIPLE \
+            '-DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DCMAKE_C_COMPILER=/usr/bin/gcc;-DCMAKE_CXX_COMPILER=/usr/bin/g++' > /dev/null
+          cd build
+          python3 -c '
+          import json
+          for e in json.load(open("compile_commands.json")):
+              if e["file"].endswith("lib/WindowsDriver/MSVCPaths.cpp"):
+                  print(e["command"])
+          ' > msvcpaths.sh
+          cat msvcpaths.sh
+          mkdir -p lib/WindowsDriver/CMakeFiles/LLVMWindowsDriver.dir
+          status=0
+          sh msvcpaths.sh > compile.log 2>&1 || status=$?
+          cat compile.log
+          if [ "${{ matrix.mingw }}" = v9.0.0 ]; then
+            if [ $status = 0 ]; then echo "::error::MSVCPaths.cpp compiled with mingw-w64 v9.0.0"; exit 1; fi
+            grep -q "_Deref_out_opt_" compile.log || { echo "::error::not the expected sal.h error"; exit 1; }
+            echo "== failed as expected"
+          else
+            [ $status = 0 ] || exit $status
+            echo "== COM error handler and COM/BSTR symbols (U = imported):"
+            llvm-nm -C lib/WindowsDriver/CMakeFiles/LLVMWindowsDriver.dir/MSVCPaths.cpp.obj \
+              | grep -E "_com_(raise|issue)_error|_set_com_error_handler|Sys(Alloc|Free)String|CoCreateInstance|CoInitializeEx" || true
+          fi
+
+  mingw-clang:
+    name: llvm-mingw ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    env:
+      LLVM_MINGW: "20261006"
+      TRIPLE: ${{ matrix.arch }}-w64-mingw32
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          sparse-checkout: |
+            llvm
+            cmake
+            third-party
+            libc
+      - name: llvm-mingw
+        run: |
+          set -ex
+          sudo apt-get update -q && sudo apt-get install -yq ninja-build
+          TC=$RUNNER_TEMP/llvm-mingw
+          mkdir -p $TC
+          curl -fsSL https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW/llvm-mingw-$LLVM_MINGW-ucrt-ubuntu-22.04-x86_64.tar.xz \
+            | tar -xJ -C $TC --strip-components=1
+          grep -E "define __MINGW64_VERSION_(MAJOR|MINOR|BUGFIX)" $TC/generic-w64-mingw32/include/_mingw_mac.h
+          echo "$TC/bin" >> $GITHUB_PATH
+          echo "TC=$TC" >> $GITHUB_ENV
+      - name: Build setupapi-probe
+        run: |
+          cmake $LLVM_CMAKE_ARGS \
+            -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.arch }} \
+            -DCMAKE_C_COMPILER=$TRIPLE-clang -DCMAKE_CXX_COMPILER=$TRIPLE-clang++ \
+            -DCMAKE_RC_COMPILER=$TRIPLE-windres \
+            -DCMAKE_FIND_ROOT_PATH=$TC/$TRIPLE \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+            -DCMAKE_EXE_LINKER_FLAGS=-static \
+            -DLLVM_HOST_TRIPLE=$TRIPLE \
+            '-DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DCMAKE_C_COMPILER=/usr/bin/gcc;-DCMAKE_CXX_COMPILER=/usr/bin/g++'
+          ninja -C build setupapi-probe
+      - name: MSVCPaths.cpp warnings, probe link line and imports
+        run: |
+          touch llvm/lib/WindowsDriver/MSVCPaths.cpp
+          ninja -C build -v lib/WindowsDriver/CMakeFiles/LLVMWindowsDriver.dir/MSVCPaths.cpp.obj
+          ninja -C build -t commands setupapi-probe | tail -n 1
+          llvm-objdump -p build/bin/setupapi-probe.exe | grep "DLL Name"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: probe-llvm-mingw-${{ matrix.arch }}
+          path: build/bin/setupapi-probe.exe
+
+  mingw-gcc:
+    name: GCC x86_64, mingw-w64 10.0.0 (Debian bookworm)
+    runs-on: ubuntu-24.04
+    container: debian:bookworm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Packages
+        run: |
+          apt-get update -q
+          apt-get install -yq --no-install-recommends git ca-certificates cmake ninja-build python3 gcc g++ \
+            gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix binutils-mingw-w64-x86-64
+          dpkg -l mingw-w64-x86-64-dev g++-mingw-w64-x86-64-posix | grep ^ii
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          sparse-checkout: |
+            llvm
+            cmake
+            third-party
+            libc
+      - name: Build setupapi-probe
+        run: |
+          set -e
+          cmake $LLVM_CMAKE_ARGS \
+            -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
+            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-posix \
+            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-posix \
+            -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres \
+            -DCMAKE_FIND_ROOT_PATH=/usr/x86_64-w64-mingw32 \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+            -DCMAKE_EXE_LINKER_FLAGS=-static \
+            -DLLVM_HOST_TRIPLE=x86_64-w64-mingw32 \
+            '-DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DCMAKE_C_COMPILER=/usr/bin/gcc;-DCMAKE_CXX_COMPILER=/usr/bin/g++'
+          ninja -C build setupapi-probe
+      - name: MSVCPaths.cpp warnings, probe link line and imports
+        run: |
+          touch llvm/lib/WindowsDriver/MSVCPaths.cpp
+          ninja -C build -v lib/WindowsDriver/CMakeFiles/LLVMWindowsDriver.dir/MSVCPaths.cpp.obj
+          ninja -C build -t commands setupapi-probe | tail -n 1
+          x86_64-w64-mingw32-objdump -p build/bin/setupapi-probe.exe | grep "DLL Name"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: probe-gcc-x86_64
+          path: build/bin/setupapi-probe.exe
+
+  msvc:
+    name: MSVC x64
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          sparse-checkout: |
+            llvm
+            cmake
+            third-party
+            libc
+      - name: Find Visual Studio
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          "VSDIR=$vs" >> $env:GITHUB_ENV
+      - name: Build setupapi-probe (Visual Studio environment in this step only)
+        shell: cmd
+        run: |
+          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cmake %LLVM_CMAKE_ARGS% || exit /b 1
+          ninja -C build setupapi-probe || exit /b 1
+          copy /b llvm\lib\WindowsDriver\MSVCPaths.cpp +,, llvm\lib\WindowsDriver\MSVCPaths.cpp
+          ninja -C build -v lib/WindowsDriver/CMakeFiles/LLVMWindowsDriver.dir/MSVCPaths.cpp.obj || exit /b 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: probe-msvc-x86_64
+          path: build/bin/setupapi-probe.exe
+
+  run:
+    name: Run on ${{ matrix.os }}
+    needs: [mingw-clang, mingw-gcc, msvc]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            arch: x86_64
+          - os: windows-11-arm
+            arch: aarch64
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: probe-*-${{ matrix.arch }}
+          path: probes
+      - name: Run the Setup API lookup without a Visual Studio environment
+        shell: pwsh
+        run: |
+          "VCToolsInstallDir=[$env:VCToolsInstallDir] VSINSTALLDIR=[$env:VSINSTALLDIR]"
+          "cl.exe in PATH: $([bool](Get-Command cl.exe -ErrorAction SilentlyContinue))"
+          "== vswhere:"
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -all -products * -format text -property installationPath
+          $failed = $false
+          foreach ($exe in Get-ChildItem probes -Recurse -Filter setupapi-probe.exe) {
+            "== $($exe.Directory.Name)"
+            & $exe.FullName
+            if ($LASTEXITCODE) { $failed = $true }
+          }
+          if ($failed) { exit 1 }
